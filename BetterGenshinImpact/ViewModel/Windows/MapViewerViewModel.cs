@@ -22,6 +22,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Script;
+using BetterGenshinImpact.GameTask.AutoQuest.Process;
 using BetterGenshinImpact.GameTask.AutoPathing;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoPathing.Model.Enum;
@@ -647,15 +648,20 @@ public partial class MapViewerViewModel : ObservableObject
         ? RecordingToggleText
         : IsTargetNavigationRunning ? "取消追踪" : "开始追踪";
 
-    public string ModeActionToolTip => IsRecorderMode
-        ? RecordingToggleToolTip
-        : IsTargetNavigationRunning
-            ? "取消当前目标导航并释放所有输入"
-            : "自动读取实时坐标、规划并执行到地图目标";
+    public string ModeActionToolTip
+    {
+        get
+        {
+            var primaryAction = IsRecorderMode
+                ? RecordingToggleToolTip
+                : IsTargetNavigationRunning
+                    ? "取消当前目标导航并释放所有输入"
+                    : "自动读取实时坐标、规划并执行到地图目标";
+            return $"{primaryAction}\nCtrl+点击：任务图标基线调试\nCtrl+Shift+点击：金色粒子路径实验";
+        }
+    }
 
-    public ICommand ModeActionCommand => IsRecorderMode
-        ? ToggleRecordingCommand
-        : RunTargetNavigationCommand;
+    public ICommand ModeActionCommand => RunTargetNavigationCommand;
 
     public string TargetActionDisplayText => string.IsNullOrWhiteSpace(TargetAction)
         ? "无动作"
@@ -2965,6 +2971,20 @@ public partial class MapViewerViewModel : ObservableObject
     [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task RunTargetNavigation()
     {
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            var enableGoldenParticleGuidance =
+                (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+            await RunQuestProcessDebug(enableGoldenParticleGuidance);
+            return;
+        }
+
+        if (IsRecorderMode)
+        {
+            await ToggleRecording();
+            return;
+        }
+
         if (IsTargetNavigationRunning)
         {
             CancelTargetNavigation();
@@ -3224,6 +3244,60 @@ public partial class MapViewerViewModel : ObservableObject
     {
         CancelTargetNavigation();
         Simulation.ReleaseAllKey();
+    }
+
+    private async Task RunQuestProcessDebug(bool enableGoldenParticleGuidance)
+    {
+        if (!ConfirmJsonEditsBeforeLeavingRecorder(DialogOwner))
+        {
+            return;
+        }
+
+        IsSidePanelVisible = true;
+        IsRecorderMode = false;
+        RecordStatusText = enableGoldenParticleGuidance
+            ? "自动剧情调试：启动金色粒子路径实验..."
+            : "自动剧情调试：启动 Bigmap 图标基线跟踪...";
+        await ScriptService.StartGameTask();
+        SystemControl.ActivateWindow();
+
+        QuestProcessRunResult? result = null;
+        await new TaskRunner().RunThreadAsync(async () =>
+        {
+            var ct = CancellationContext.Instance.Cts.Token;
+            var debugDirectory = Global.Absolute(Path.Combine("User", "AutoQuest", "Debug"));
+            Directory.CreateDirectory(debugDirectory);
+            var processFilePath = Path.Combine(debugDirectory, "process.json");
+            const string processText = """
+                                       作者：BetterGI 自动剧情 C# 联调
+                                       描述：低风险验证 Bigmap 图标类型、V 刷新与移动闭环
+
+                                       追踪图标 Bigmap
+                                       任务完成
+                                       """;
+            await File.WriteAllTextAsync(processFilePath, processText, ct);
+            if (enableGoldenParticleGuidance)
+            {
+                var iconTracker = new QuestProcessIconTracker(
+                    new QuestMarkerFollowerFactory(enableGoldenParticleGuidance: true));
+                var runtime = new QuestProcessRuntime(iconTracker);
+                var runner = new QuestProcessRunner(
+                    new QuestDescriptionProvider(),
+                    runtime);
+                result = await new QuestProcessTask(
+                    new QuestProcessTaskParam(processFilePath),
+                    runner: runner).Start(ct);
+            }
+            else
+            {
+                result = await new QuestProcessTask(
+                    new QuestProcessTaskParam(processFilePath)).Start(ct);
+            }
+        });
+
+        RecordStatusText = result == null
+            ? "自动剧情调试：未返回结果"
+            : $"自动剧情调试：{result.Status} / {result.Message}";
     }
 
     [RelayCommand]
